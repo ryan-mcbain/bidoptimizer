@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "BidOptimizer - Smart Real Estate Bidding",
+  title: "OfferEdge - Smart Real Estate Bidding",
   description: "Game theory-powered bid optimization for homebuyers. Make data-driven offers backed by Nobel Prize-winning auction theory.",
-  keywords: ["real estate", "bidding", "home buying", "auction theory", "game theory"],
+  keywords: ["real estate", "bidding", "home buying", "auction theory", "game theory", "OfferEdge"],
 };
 
 export default function RootLayout({

@@ -1,7 +1,7 @@
 {
-  "name": "bidoptimizer",
+  "name": "offeredge",
   "version": "0.1.0",
-  "description": "Game theory-powered real estate bidding optimization",
+  "description": "OfferEdge - Game theory-powered real estate bidding optimization",
   "private": true,
   "scripts": {
     "dev": "next dev",

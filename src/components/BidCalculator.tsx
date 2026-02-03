@@ -101,7 +101,7 @@ export function BidCalculator() {
           <div className="inline-flex items-center gap-2 bg-emerald-600 text-white px-4 py-1 rounded-full text-sm font-medium mb-4">
             🎓 Game Theory Powered
           </div>
-          <h1 className="text-3xl font-bold text-slate-900">BidOptimizer</h1>
+          <h1 className="text-3xl font-bold text-slate-900">OfferEdge</h1>
           <p className="text-slate-600 mt-1">
             Optimal Home Bidding Backed by Auction Theory
           </p>
@@ -164,7 +164,7 @@ export function BidCalculator() {
         {/* Footer */}
         <div className="text-center text-xs text-slate-400 mt-8 pb-4">
           <p>
-            BidOptimizer v2.0 incorporates research from the 2020 Nobel Prize in
+            OfferEdge incorporates research from the 2020 Nobel Prize in
             Economics
           </p>
           <p>

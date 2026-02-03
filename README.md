@@ -1,4 +1,4 @@
-# BidOptimizer
+# OfferEdge
 
 **Game theory-powered real estate bidding optimization**
 
@@ -9,6 +9,7 @@ A Progressive Web App that helps homebuyers determine optimal bid amounts using 
 - 🎯 **Winner's Curse Protection** - Automatically adjusts bids based on competition level
 - 📊 **Risk-Adjusted Strategy** - Tailors recommendations to your risk tolerance
 - 🧠 **Behavioral Insights** - Accounts for loss aversion and emotional factors
+- 🔗 **Listing Import** - Paste a Zillow or Redfin link to auto-populate property details
 - 📱 **Mobile-Friendly** - Responsive design works on all devices
 
 ## Tech Stack

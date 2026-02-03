@@ -8,9 +8,9 @@ export default function Home() {
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center">
-              <span className="text-white font-bold text-lg">B</span>
+              <span className="text-white font-bold text-lg">O</span>
             </div>
-            <span className="font-semibold text-xl text-slate-900 dark:text-white">BidOptimizer</span>
+            <span className="font-semibold text-xl text-slate-900 dark:text-white">OfferEdge</span>
           </div>
           <Link
             href="/calculator"
@@ -31,7 +31,7 @@ export default function Home() {
             Bid Smarter,<br />Not Higher
           </h1>
           <p className="text-lg text-slate-600 dark:text-slate-300 max-w-2xl mx-auto mb-8">
-            Stop guessing on home offers. BidOptimizer uses game theory and behavioral
+            Stop guessing on home offers. OfferEdge uses game theory and behavioral
             economics to calculate your optimal bid—maximizing your chance of winning
             while protecting you from overpaying.
           </p>
@@ -91,7 +91,7 @@ export default function Home() {
       {/* Footer */}
       <footer className="border-t border-slate-200 dark:border-slate-700 py-8 mt-16">
         <div className="max-w-5xl mx-auto px-6 text-center text-sm text-slate-500 dark:text-slate-400">
-          <p>BidOptimizer • Game Theory for Home Buyers</p>
+          <p>OfferEdge • Game Theory for Home Buyers</p>
           <p className="mt-2">For educational and decision-support purposes only. Not financial advice.</p>
         </div>
       </footer>
