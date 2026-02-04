@@ -139,7 +139,38 @@ export function parseZillowHtml(html: string, url: string): ScrapedPropertyData 
       }
     }
 
-    // Strategy 3: Look for preloaded Apollo state or similar data
+    // Strategy 3: Look for preloaded state (Zillow's primary data source)
+    const preloadedStateMatch = html.match(/window\.__PRELOADED_STATE__\s*=\s*"([^"]+)"/i);
+    if (preloadedStateMatch) {
+      try {
+        // Zillow encodes this as a URI-encoded JSON string
+        const decoded = decodeURIComponent(preloadedStateMatch[1]);
+        const preloadedData = JSON.parse(decoded);
+        const propertyData = extractZillowFromPreloadedState(preloadedData);
+        if (propertyData && hasRequiredData(propertyData)) {
+          return completePropertyData(propertyData, 'zillow', url);
+        }
+      } catch {
+        // Continue to fallback
+      }
+    }
+
+    // Strategy 4: Look for data in data-zrr-shared-data-key attribute
+    const sharedDataMatch = html.match(/data-zrr-shared-data-key="[^"]*"[^>]*>([^<]+)</i);
+    if (sharedDataMatch) {
+      try {
+        const decoded = sharedDataMatch[1].replace(/<!--/g, '').replace(/-->/g, '');
+        const sharedData = JSON.parse(decoded);
+        const propertyData = extractZillowFromSharedData(sharedData);
+        if (propertyData && hasRequiredData(propertyData)) {
+          return completePropertyData(propertyData, 'zillow', url);
+        }
+      } catch {
+        // Continue to fallback
+      }
+    }
+
+    // Strategy 5: Look for preloaded Apollo state or similar data
     const apolloMatch = html.match(/window\.__APOLLO_STATE__\s*=\s*({[\s\S]*?});?\s*(?:<\/script>|window\.)/i);
     if (apolloMatch) {
       try {
@@ -153,7 +184,21 @@ export function parseZillowHtml(html: string, url: string): ScrapedPropertyData 
       }
     }
 
-    // Strategy 4: Look for inline script with property data
+    // Strategy 6: Look for gdpClientCache (newer Zillow pages)
+    const gdpCacheMatch = html.match(/gdpClientCache\s*[=:]\s*({[\s\S]*?})\s*[,;]?\s*(?:<\/script>|window\.|var\s)/i);
+    if (gdpCacheMatch) {
+      try {
+        const cacheData = JSON.parse(gdpCacheMatch[1]);
+        const propertyData = extractZillowFromGdpCache(cacheData);
+        if (propertyData && hasRequiredData(propertyData)) {
+          return completePropertyData(propertyData, 'zillow', url);
+        }
+      } catch {
+        // Continue to fallback
+      }
+    }
+
+    // Strategy 7: Look for inline script with property data
     const inlineDataMatch = html.match(/(?:zpid|propertyData|listingData)\s*[=:]\s*({[\s\S]*?})\s*[,;]/i);
     if (inlineDataMatch) {
       try {
@@ -164,7 +209,7 @@ export function parseZillowHtml(html: string, url: string): ScrapedPropertyData 
       }
     }
 
-    // Strategy 5: HTML parsing fallback
+    // Strategy 8: HTML parsing fallback (enhanced)
     return parseZillowFromHtml(html, url);
 
   } catch (error) {
@@ -261,6 +306,149 @@ function extractZillowFromApollo(data: Record<string, unknown>): Partial<Scraped
   }
 }
 
+function extractZillowFromPreloadedState(data: Record<string, unknown>): Partial<ScrapedPropertyData> | null {
+  try {
+    // Navigate through Zillow's preloaded state structure
+    // Try multiple possible paths where property data might be
+    const gdp = data.gdp as Record<string, unknown>;
+    const building = gdp?.building as Record<string, unknown>;
+    const property = (building || gdp?.property || data.property) as Record<string, unknown>;
+
+    if (!property) {
+      // Try to find property in cache
+      const cache = data.cache as Record<string, unknown>;
+      if (cache) {
+        for (const value of Object.values(cache)) {
+          if (typeof value === 'object' && value !== null) {
+            const obj = value as Record<string, unknown>;
+            if (obj.streetAddress || obj.price || obj.zpid) {
+              return extractPropertyFields(obj);
+            }
+          }
+        }
+      }
+      return null;
+    }
+
+    return extractPropertyFields(property);
+  } catch {
+    return null;
+  }
+}
+
+function extractZillowFromSharedData(data: Record<string, unknown>): Partial<ScrapedPropertyData> | null {
+  try {
+    // Zillow shared data can have various structures
+    const apiCache = data.apiCache as string;
+    if (apiCache) {
+      try {
+        const cacheData = JSON.parse(apiCache);
+        for (const value of Object.values(cacheData)) {
+          if (typeof value === 'object' && value !== null) {
+            const obj = value as Record<string, unknown>;
+            const property = obj.property as Record<string, unknown>;
+            if (property) {
+              return extractPropertyFields(property);
+            }
+          }
+        }
+      } catch {
+        // Continue
+      }
+    }
+
+    // Direct property access
+    const property = data.property as Record<string, unknown>;
+    if (property) {
+      return extractPropertyFields(property);
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function extractZillowFromGdpCache(data: Record<string, unknown>): Partial<ScrapedPropertyData> | null {
+  try {
+    // gdpClientCache contains stringified JSON values
+    for (const value of Object.values(data)) {
+      if (typeof value === 'string') {
+        try {
+          const parsed = JSON.parse(value);
+          const property = parsed.property as Record<string, unknown>;
+          if (property) {
+            return extractPropertyFields(property);
+          }
+        } catch {
+          // Continue
+        }
+      } else if (typeof value === 'object' && value !== null) {
+        const obj = value as Record<string, unknown>;
+        const property = obj.property as Record<string, unknown>;
+        if (property) {
+          return extractPropertyFields(property);
+        }
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Helper to extract common property fields from various Zillow data structures
+ */
+function extractPropertyFields(property: Record<string, unknown>): Partial<ScrapedPropertyData> {
+  // Handle nested address object or direct address string
+  let address = 'Unknown';
+  const addressObj = property.address as Record<string, unknown>;
+  if (addressObj && typeof addressObj === 'object') {
+    address = [
+      addressObj.streetAddress,
+      addressObj.city,
+      addressObj.state,
+      addressObj.zipcode
+    ].filter(Boolean).join(', ') || 'Unknown';
+  } else if (property.streetAddress) {
+    address = property.streetAddress as string;
+  } else if (property.fullAddress) {
+    address = property.fullAddress as string;
+  }
+
+  // Handle price which may be nested
+  let price = 0;
+  if (property.price) {
+    price = parsePrice(property.price as string);
+  } else if (property.listPrice) {
+    price = parsePrice(property.listPrice as string);
+  } else {
+    const priceObj = property.priceHistory as unknown[];
+    if (Array.isArray(priceObj) && priceObj.length > 0) {
+      const latest = priceObj[0] as Record<string, unknown>;
+      price = parsePrice(latest.price as string);
+    }
+  }
+
+  // Check for price reduction
+  const priceHistory = property.priceHistory as unknown[];
+  const hasPriceReduction = Array.isArray(priceHistory) && priceHistory.length > 1;
+
+  return {
+    address,
+    listPrice: price,
+    daysOnMarket: extractNumber(property.daysOnZillow as string || property.timeOnZillow as string || property.dom as string),
+    bedrooms: extractNumber(property.bedrooms as string || property.beds as string),
+    bathrooms: extractNumber(property.bathrooms as string || property.baths as string),
+    propertyType: normalizePropertyType(property.homeType as string || property.propertyType as string || property.homeStatus as string),
+    squareFeet: extractNumber(property.livingArea as string || property.livingAreaValue as string || property.sqft as string),
+    yearBuilt: extractNumber(property.yearBuilt as string),
+    priceReduced: hasPriceReduction,
+    estimatedValue: parsePrice(property.zestimate as string || property.rentZestimate as string),
+  };
+}
+
 function parseZillowInlineData(data: Record<string, unknown>, url: string): ScrapedPropertyData | null {
   try {
     return {
@@ -284,37 +472,116 @@ function parseZillowInlineData(data: Record<string, unknown>, url: string): Scra
 
 function parseZillowFromHtml(html: string, url: string): ScrapedPropertyData | null {
   try {
-    // Extract price from common patterns
-    const priceMatch = html.match(/\$[\d,]+(?:\.\d{2})?/);
-    const price = priceMatch ? parsePrice(priceMatch[0]) : 0;
+    // Extract price from multiple patterns (Zillow uses various formats)
+    let price = 0;
+    const pricePatterns = [
+      /class="[^"]*price[^"]*"[^>]*>\s*\$?([\d,]+)/i,
+      /data-testid="[^"]*price[^"]*"[^>]*>\s*\$?([\d,]+)/i,
+      /\$\s*([\d,]+(?:,\d{3})*)/,
+      /"price"\s*:\s*"?\$?([\d,]+)/i,
+      /itemprop="price"[^>]*content="([\d,]+)"/i,
+    ];
+    for (const pattern of pricePatterns) {
+      const match = html.match(pattern);
+      if (match) {
+        price = parsePrice(match[1]);
+        if (price > 10000) break; // Likely a real price, not a count
+      }
+    }
 
-    // Extract address from title or meta tags
-    const titleMatch = html.match(/<title[^>]*>([^<]+)</i);
-    const addressFromTitle = titleMatch ? titleMatch[1].split('|')[0].trim() : '';
+    // Extract address from multiple sources
+    let address = '';
+    const addressPatterns = [
+      /<title[^>]*>([^|<]+)/i,
+      /class="[^"]*address[^"]*"[^>]*>([^<]+)/i,
+      /data-testid="[^"]*address[^"]*"[^>]*>([^<]+)/i,
+      /"streetAddress"\s*:\s*"([^"]+)"/i,
+      /itemprop="streetAddress"[^>]*>([^<]+)/i,
+      /<h1[^>]*>([^<]+(?:St|Ave|Rd|Dr|Ln|Ct|Blvd|Way|Pl)[^<]*)</i,
+    ];
+    for (const pattern of addressPatterns) {
+      const match = html.match(pattern);
+      if (match && match[1].trim().length > 5) {
+        address = match[1].trim().split('|')[0].split('-')[0].trim();
+        break;
+      }
+    }
 
-    // Extract beds/baths from common patterns
-    const bedsMatch = html.match(/(\d+)\s*(?:bed|br|bedroom)/i);
-    const bathsMatch = html.match(/(\d+(?:\.\d+)?)\s*(?:bath|ba|bathroom)/i);
+    // Extract beds from multiple patterns
+    let beds = 0;
+    const bedsPatterns = [
+      /(\d+)\s*(?:bd|bed|bedroom|br)\b/i,
+      /"bedrooms?"\s*:\s*(\d+)/i,
+      /data-testid="[^"]*bed[^"]*"[^>]*>(\d+)/i,
+    ];
+    for (const pattern of bedsPatterns) {
+      const match = html.match(pattern);
+      if (match) {
+        beds = parseInt(match[1]);
+        if (beds > 0 && beds < 20) break;
+      }
+    }
+
+    // Extract baths from multiple patterns
+    let baths = 0;
+    const bathsPatterns = [
+      /(\d+(?:\.\d+)?)\s*(?:ba|bath|bathroom)\b/i,
+      /"bathrooms?"\s*:\s*(\d+(?:\.\d+)?)/i,
+      /data-testid="[^"]*bath[^"]*"[^>]*>(\d+(?:\.\d+)?)/i,
+    ];
+    for (const pattern of bathsPatterns) {
+      const match = html.match(pattern);
+      if (match) {
+        baths = parseFloat(match[1]);
+        if (baths > 0 && baths < 20) break;
+      }
+    }
 
     // Extract days on market
-    const domMatch = html.match(/(\d+)\s*days?\s*(?:on\s*)?(?:zillow|market)/i);
+    let dom = 0;
+    const domPatterns = [
+      /(\d+)\s*days?\s*(?:on\s*)?zillow/i,
+      /(\d+)\s*days?\s*(?:on\s*)?market/i,
+      /"daysOnZillow"\s*:\s*(\d+)/i,
+      /"timeOnZillow"\s*:\s*"(\d+)/i,
+    ];
+    for (const pattern of domPatterns) {
+      const match = html.match(pattern);
+      if (match) {
+        dom = parseInt(match[1]);
+        break;
+      }
+    }
 
     // Extract sqft
-    const sqftMatch = html.match(/([\d,]+)\s*(?:sq\.?\s*ft|sqft|square\s*feet)/i);
+    let sqft: number | undefined;
+    const sqftPatterns = [
+      /([\d,]+)\s*(?:sq\.?\s*ft|sqft|square\s*feet)/i,
+      /"livingArea"\s*:\s*([\d,]+)/i,
+      /"livingAreaValue"\s*:\s*([\d,]+)/i,
+    ];
+    for (const pattern of sqftPatterns) {
+      const match = html.match(pattern);
+      if (match) {
+        sqft = parseInt(match[1].replace(/,/g, ''));
+        if (sqft > 100) break;
+      }
+    }
 
-    if (!price && !addressFromTitle) {
+    // Need at least price or address to be useful
+    if (!price && !address) {
       return null;
     }
 
     return {
-      address: addressFromTitle || 'Address from URL',
+      address: address || 'Address from URL',
       listPrice: price,
-      daysOnMarket: domMatch ? parseInt(domMatch[1]) : 0,
-      bedrooms: bedsMatch ? parseInt(bedsMatch[1]) : 0,
-      bathrooms: bathsMatch ? parseFloat(bathsMatch[1]) : 0,
+      daysOnMarket: dom,
+      bedrooms: beds,
+      bathrooms: baths,
       propertyType: 'other',
-      squareFeet: sqftMatch ? parseInt(sqftMatch[1].replace(/,/g, '')) : undefined,
-      priceReduced: html.toLowerCase().includes('price cut') || html.toLowerCase().includes('reduced'),
+      squareFeet: sqft,
+      priceReduced: html.toLowerCase().includes('price cut') || html.toLowerCase().includes('reduced') || html.toLowerCase().includes('price drop'),
       source: 'zillow',
       sourceUrl: url,
       scrapedAt: new Date().toISOString(),
