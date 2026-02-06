@@ -427,10 +427,11 @@ function extractZillowFromApollo(data: Record<string, unknown>): Partial<Scraped
 
 function extractZillowFromPreloadedState(data: Record<string, unknown>): Partial<ScrapedPropertyData> | null {
   try {
-    // Try multiple paths
+    // Try multiple paths - cast nested objects properly for TypeScript
+    const gdp = data.gdp as Record<string, unknown> | undefined;
     const paths = [
-      data.gdp?.building,
-      data.gdp?.property,
+      gdp?.building,
+      gdp?.property,
       data.property,
       data.cache,
     ];
