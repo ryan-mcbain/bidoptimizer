@@ -33,6 +33,12 @@ export interface BidCalculationParams {
   /** Your estimate of the property's true market value based on comps */
   estimatedValue: number;
 
+  /** Low comparable value - defines the lower bound of the value distribution */
+  lowComp: number;
+
+  /** High comparable value - defines the upper bound of the value distribution */
+  highComp: number;
+
   /** Estimated number of competing bidders (1-30) */
   numBidders: number;
 

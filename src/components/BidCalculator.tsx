@@ -49,6 +49,8 @@ export function BidCalculator() {
     const bidResult = calculateOptimalBid({
       listPrice: formData.listPrice,
       estimatedValue: formData.estimatedValue,
+      lowComp: formData.compsLow,     // Lower bound of value distribution
+      highComp: formData.compsHigh,   // Upper bound of value distribution
       numBidders: formData.numBidders,
       daysOnMarket: formData.daysOnMarket,
       marketHeat: formData.marketHeat,
@@ -58,10 +60,12 @@ export function BidCalculator() {
       priceReduced: formData.priceReduced,
     });
 
+    // PHASE 5: Pass effective valuation to set proper escalation cap
     const escalation = optimizeEscalation(
       bidResult.optimalBid,
       formData.maxBudget,
-      formData.numBidders
+      formData.numBidders,
+      bidResult.modelParameters.adjustedValue  // v_eff for cap calculation
     );
 
     setResults({ ...bidResult, escalation });

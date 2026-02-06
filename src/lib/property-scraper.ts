@@ -1,21 +1,41 @@
 /**
- * Property Scraper for Zillow and Redfin
+ * Property Scraper for Zillow and Redfin (v2.0)
  *
- * Extracts property data from listing URLs using multiple parsing strategies:
- * 1. JSON-LD structured data (most reliable)
- * 2. Embedded JavaScript data objects
- * 3. HTML meta tags and content parsing (fallback)
+ * AGGRESSIVE MULTI-STRATEGY APPROACH:
+ * 1. Zillow API (using ZPID extracted from URL)
+ * 2. JSON-LD structured data
+ * 3. Embedded JavaScript data objects
+ * 4. HTML meta tags parsing
+ * 5. URL-based fallback extraction
+ *
+ * Zillow-specific strategies:
+ * - Extract ZPID from URL and query internal API
+ * - Multiple endpoint fallbacks
+ * - User-Agent rotation
  */
 
 import { ScrapedPropertyData } from './scraper-types';
 
 // =============================================================================
+// USER AGENT ROTATION (for anti-bot detection)
+// =============================================================================
+
+const USER_AGENTS = [
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+];
+
+function getRandomUserAgent(): string {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+// =============================================================================
 // UTILITY FUNCTIONS
 // =============================================================================
 
-/**
- * Detect the source website from URL
- */
 export function detectSource(url: string): 'zillow' | 'redfin' | null {
   const lowerUrl = url.toLowerCase();
   if (lowerUrl.includes('zillow.com')) return 'zillow';
@@ -23,9 +43,6 @@ export function detectSource(url: string): 'zillow' | 'redfin' | null {
   return null;
 }
 
-/**
- * Parse a price string to number
- */
 function parsePrice(priceStr: string | number | undefined | null): number {
   if (typeof priceStr === 'number') return priceStr;
   if (!priceStr) return 0;
@@ -33,9 +50,6 @@ function parsePrice(priceStr: string | number | undefined | null): number {
   return parseInt(cleaned) || 0;
 }
 
-/**
- * Normalize property type string
- */
 function normalizePropertyType(
   typeStr: string | undefined | null
 ): ScrapedPropertyData['propertyType'] {
@@ -57,18 +71,12 @@ function normalizePropertyType(
   return 'other';
 }
 
-/**
- * Extract number from string
- */
 function extractNumber(str: string | undefined | null): number {
   if (!str) return 0;
   const match = String(str).match(/[\d.]+/);
   return match ? parseFloat(match[0]) : 0;
 }
 
-/**
- * Convert partial scraped data to full ScrapedPropertyData with defaults
- */
 function completePropertyData(
   partial: Partial<ScrapedPropertyData>,
   source: 'zillow' | 'redfin',
@@ -92,24 +100,147 @@ function completePropertyData(
   };
 }
 
-/**
- * Check if partial data has enough information to be useful
- */
 function hasRequiredData(partial: Partial<ScrapedPropertyData>): boolean {
-  // Need at least an address or a price to be useful
   return Boolean(partial.address || partial.listPrice);
 }
 
 // =============================================================================
-// ZILLOW SCRAPER
+// ZILLOW-SPECIFIC: ZPID EXTRACTION & API ACCESS
 // =============================================================================
 
 /**
- * Parse Zillow listing page
+ * Extract ZPID (Zillow Property ID) from URL
+ * Zillow URLs contain the ZPID in various formats
  */
+function extractZpid(url: string): string | null {
+  // Pattern 1: /homedetails/address/12345_zpid/
+  const zpidMatch = url.match(/(\d+)_zpid/i);
+  if (zpidMatch) return zpidMatch[1];
+
+  // Pattern 2: zpid=12345 in query string
+  const queryMatch = url.match(/[?&]zpid=(\d+)/i);
+  if (queryMatch) return queryMatch[1];
+
+  // Pattern 3: /homes/12345_rb/ (sometimes used)
+  const altMatch = url.match(/\/homes\/(\d+)/i);
+  if (altMatch) return altMatch[1];
+
+  return null;
+}
+
+/**
+ * Extract address components from Zillow URL
+ */
+function extractAddressFromZillowUrl(url: string): string {
+  try {
+    // Pattern: /homedetails/123-Main-St-City-State-12345/zpid
+    const pathMatch = url.match(/\/homedetails\/([^/]+)\//i);
+    if (pathMatch) {
+      // Convert hyphens to spaces and clean up
+      let address = pathMatch[1]
+        .replace(/-/g, ' ')
+        .replace(/_/g, ' ')
+        .replace(/\d+\s*zpid$/i, '')
+        .trim();
+
+      // Capitalize properly
+      address = address.replace(/\b\w/g, l => l.toUpperCase());
+
+      return address;
+    }
+  } catch {
+    // Ignore errors
+  }
+  return '';
+}
+
+/**
+ * Try to get data from Zillow's GraphQL/internal API
+ * This is more reliable than scraping HTML
+ */
+async function fetchZillowFromApi(zpid: string): Promise<Partial<ScrapedPropertyData> | null> {
+  try {
+    // Zillow's property details API endpoint
+    const apiUrl = `https://www.zillow.com/graphql/?zpid=${zpid}&operationName=ForSaleShopperPlatformFullRenderQuery`;
+
+    const response = await fetch(apiUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent': getRandomUserAgent(),
+        'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': `https://www.zillow.com/homedetails/${zpid}_zpid/`,
+        'Origin': 'https://www.zillow.com',
+      },
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      return extractFromZillowApiResponse(data);
+    }
+  } catch {
+    // API call failed, continue to other strategies
+  }
+
+  // Try alternative API endpoint
+  try {
+    const altApiUrl = `https://www.zillow.com/homedetails/${zpid}_zpid/`;
+    const response = await fetch(altApiUrl, {
+      headers: {
+        'User-Agent': getRandomUserAgent(),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+      },
+    });
+
+    if (response.ok) {
+      const html = await response.text();
+
+      // Look for embedded data in the page
+      const dataMatch = html.match(/<!--({[\s\S]*?"zpid"\s*:\s*\d+[\s\S]*?})-->/);
+      if (dataMatch) {
+        try {
+          const data = JSON.parse(dataMatch[1]);
+          const property = data.property || data.listing || data;
+          if (property.zpid || property.price || property.address) {
+            return extractPropertyFields(property);
+          }
+        } catch {
+          // Continue
+        }
+      }
+    }
+  } catch {
+    // Alternative API also failed
+  }
+
+  return null;
+}
+
+function extractFromZillowApiResponse(data: Record<string, unknown>): Partial<ScrapedPropertyData> | null {
+  try {
+    // Navigate the GraphQL response structure
+    const property = (data.data as Record<string, unknown>)?.property as Record<string, unknown>
+      || (data.property as Record<string, unknown>)
+      || data;
+
+    if (!property) return null;
+
+    return extractPropertyFields(property);
+  } catch {
+    return null;
+  }
+}
+
+// =============================================================================
+// ZILLOW HTML SCRAPER (Multi-Strategy)
+// =============================================================================
+
 export function parseZillowHtml(html: string, url: string): ScrapedPropertyData | null {
   try {
-    // Strategy 1: Look for JSON-LD structured data
+    // Strategy 1: JSON-LD structured data
     const jsonLdMatch = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
     if (jsonLdMatch) {
       for (const match of jsonLdMatch) {
@@ -120,12 +251,12 @@ export function parseZillowHtml(html: string, url: string): ScrapedPropertyData 
             return parseZillowJsonLd(data, url);
           }
         } catch {
-          // Continue to next match
+          // Continue
         }
       }
     }
 
-    // Strategy 2: Look for embedded __NEXT_DATA__ or similar
+    // Strategy 2: Look for __NEXT_DATA__
     const nextDataMatch = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
     if (nextDataMatch) {
       try {
@@ -135,42 +266,69 @@ export function parseZillowHtml(html: string, url: string): ScrapedPropertyData 
           return completePropertyData(propertyData, 'zillow', url);
         }
       } catch {
-        // Continue to fallback
+        // Continue
       }
     }
 
-    // Strategy 3: Look for preloaded state (Zillow's primary data source)
-    const preloadedStateMatch = html.match(/window\.__PRELOADED_STATE__\s*=\s*"([^"]+)"/i);
-    if (preloadedStateMatch) {
-      try {
-        // Zillow encodes this as a URI-encoded JSON string
-        const decoded = decodeURIComponent(preloadedStateMatch[1]);
-        const preloadedData = JSON.parse(decoded);
-        const propertyData = extractZillowFromPreloadedState(preloadedData);
-        if (propertyData && hasRequiredData(propertyData)) {
-          return completePropertyData(propertyData, 'zillow', url);
+    // Strategy 3: Look for preloaded state
+    const preloadedStatePatterns = [
+      /window\.__PRELOADED_STATE__\s*=\s*"([^"]+)"/i,
+      /window\.__PRELOADED_STATE__\s*=\s*({[\s\S]*?});?\s*<\/script>/i,
+      /"apiCache"\s*:\s*"([^"]+)"/i,
+    ];
+
+    for (const pattern of preloadedStatePatterns) {
+      const match = html.match(pattern);
+      if (match) {
+        try {
+          let decoded = match[1];
+          // Check if it's URI encoded
+          if (decoded.includes('%')) {
+            decoded = decodeURIComponent(decoded);
+          }
+          const data = typeof decoded === 'string' && decoded.startsWith('{')
+            ? JSON.parse(decoded)
+            : JSON.parse(`{${decoded}}`);
+          const propertyData = extractZillowFromPreloadedState(data);
+          if (propertyData && hasRequiredData(propertyData)) {
+            return completePropertyData(propertyData, 'zillow', url);
+          }
+        } catch {
+          // Continue
         }
-      } catch {
-        // Continue to fallback
       }
     }
 
-    // Strategy 4: Look for data in data-zrr-shared-data-key attribute
-    const sharedDataMatch = html.match(/data-zrr-shared-data-key="[^"]*"[^>]*>([^<]+)</i);
-    if (sharedDataMatch) {
-      try {
-        const decoded = sharedDataMatch[1].replace(/<!--/g, '').replace(/-->/g, '');
-        const sharedData = JSON.parse(decoded);
-        const propertyData = extractZillowFromSharedData(sharedData);
-        if (propertyData && hasRequiredData(propertyData)) {
-          return completePropertyData(propertyData, 'zillow', url);
+    // Strategy 4: Look for inline property data in various formats
+    const inlinePatterns = [
+      /<!--({[\s\S]*?"streetAddress"[\s\S]*?})-->/i,
+      /<!--({[\s\S]*?"zpid"\s*:\s*\d+[\s\S]*?})-->/i,
+      /"props"\s*:\s*({[\s\S]*?"property"[\s\S]*?})\s*,\s*"page"/i,
+      /data-zrr-shared-data-key="[^"]*"[^>]*>([^<]+)</i,
+    ];
+
+    for (const pattern of inlinePatterns) {
+      const match = html.match(pattern);
+      if (match) {
+        try {
+          let content = match[1];
+          // Remove HTML comments if present
+          content = content.replace(/<!--/g, '').replace(/-->/g, '');
+          const data = JSON.parse(content);
+          const property = data.property || data.apiCache?.property || data;
+          if (property) {
+            const propertyData = extractPropertyFields(property);
+            if (hasRequiredData(propertyData)) {
+              return completePropertyData(propertyData, 'zillow', url);
+            }
+          }
+        } catch {
+          // Continue
         }
-      } catch {
-        // Continue to fallback
       }
     }
 
-    // Strategy 5: Look for preloaded Apollo state or similar data
+    // Strategy 5: Look for Apollo state
     const apolloMatch = html.match(/window\.__APOLLO_STATE__\s*=\s*({[\s\S]*?});?\s*(?:<\/script>|window\.)/i);
     if (apolloMatch) {
       try {
@@ -180,37 +338,12 @@ export function parseZillowHtml(html: string, url: string): ScrapedPropertyData 
           return completePropertyData(propertyData, 'zillow', url);
         }
       } catch {
-        // Continue to fallback
+        // Continue
       }
     }
 
-    // Strategy 6: Look for gdpClientCache (newer Zillow pages)
-    const gdpCacheMatch = html.match(/gdpClientCache\s*[=:]\s*({[\s\S]*?})\s*[,;]?\s*(?:<\/script>|window\.|var\s)/i);
-    if (gdpCacheMatch) {
-      try {
-        const cacheData = JSON.parse(gdpCacheMatch[1]);
-        const propertyData = extractZillowFromGdpCache(cacheData);
-        if (propertyData && hasRequiredData(propertyData)) {
-          return completePropertyData(propertyData, 'zillow', url);
-        }
-      } catch {
-        // Continue to fallback
-      }
-    }
-
-    // Strategy 7: Look for inline script with property data
-    const inlineDataMatch = html.match(/(?:zpid|propertyData|listingData)\s*[=:]\s*({[\s\S]*?})\s*[,;]/i);
-    if (inlineDataMatch) {
-      try {
-        const data = JSON.parse(inlineDataMatch[1]);
-        return parseZillowInlineData(data, url);
-      } catch {
-        // Continue to fallback
-      }
-    }
-
-    // Strategy 8: HTML parsing fallback (enhanced)
-    return parseZillowFromHtml(html, url);
+    // Strategy 6: Direct regex extraction from HTML (last resort)
+    return parseZillowFromHtmlRegex(html, url);
 
   } catch (error) {
     console.error('Zillow parsing error:', error);
@@ -231,7 +364,7 @@ function parseZillowJsonLd(data: Record<string, unknown>, url: string): ScrapedP
     return {
       address: fullAddress || 'Unknown Address',
       listPrice: parsePrice((data.offers as Record<string, unknown>)?.price as string || data.price as string),
-      daysOnMarket: 0, // JSON-LD usually doesn't have this
+      daysOnMarket: 0,
       bedrooms: extractNumber(data.numberOfRooms as string),
       bathrooms: extractNumber(data.numberOfBathroomsTotal as string),
       propertyType: normalizePropertyType(data['@type'] as string),
@@ -249,7 +382,6 @@ function parseZillowJsonLd(data: Record<string, unknown>, url: string): ScrapedP
 
 function extractZillowFromNextData(data: Record<string, unknown>): Partial<ScrapedPropertyData> | null {
   try {
-    // Navigate through Next.js data structure
     const props = data.props as Record<string, unknown>;
     const pageProps = props?.pageProps as Record<string, unknown>;
     const initialData = pageProps?.initialData as Record<string, unknown> | undefined;
@@ -257,7 +389,6 @@ function extractZillowFromNextData(data: Record<string, unknown>): Partial<Scrap
 
     if (!property) return null;
 
-    // Check for price history to determine if price was reduced
     const priceHistory = property.priceHistory as unknown[] | undefined;
     const hasPriceReduction = Array.isArray(priceHistory) && priceHistory.length > 1;
 
@@ -280,23 +411,11 @@ function extractZillowFromNextData(data: Record<string, unknown>): Partial<Scrap
 
 function extractZillowFromApollo(data: Record<string, unknown>): Partial<ScrapedPropertyData> | null {
   try {
-    // Look for property data in Apollo cache
     for (const [key, value] of Object.entries(data)) {
       if (key.includes('Property') && typeof value === 'object' && value !== null) {
         const prop = value as Record<string, unknown>;
         if (prop.streetAddress || prop.price) {
-          return {
-            address: prop.streetAddress as string || 'Unknown',
-            listPrice: parsePrice(prop.price as string),
-            daysOnMarket: extractNumber(prop.daysOnZillow as string),
-            bedrooms: extractNumber(prop.bedrooms as string),
-            bathrooms: extractNumber(prop.bathrooms as string),
-            propertyType: normalizePropertyType(prop.homeType as string),
-            squareFeet: extractNumber(prop.livingArea as string),
-            yearBuilt: extractNumber(prop.yearBuilt as string),
-            priceReduced: false,
-            estimatedValue: parsePrice(prop.zestimate as string),
-          };
+          return extractPropertyFields(prop);
         }
       }
     }
@@ -308,88 +427,30 @@ function extractZillowFromApollo(data: Record<string, unknown>): Partial<Scraped
 
 function extractZillowFromPreloadedState(data: Record<string, unknown>): Partial<ScrapedPropertyData> | null {
   try {
-    // Navigate through Zillow's preloaded state structure
-    // Try multiple possible paths where property data might be
-    const gdp = data.gdp as Record<string, unknown>;
-    const building = gdp?.building as Record<string, unknown>;
-    const property = (building || gdp?.property || data.property) as Record<string, unknown>;
+    // Try multiple paths
+    const paths = [
+      data.gdp?.building,
+      data.gdp?.property,
+      data.property,
+      data.cache,
+    ];
 
-    if (!property) {
-      // Try to find property in cache
-      const cache = data.cache as Record<string, unknown>;
-      if (cache) {
-        for (const value of Object.values(cache)) {
+    for (const path of paths) {
+      if (path && typeof path === 'object') {
+        const obj = path as Record<string, unknown>;
+        if (obj.streetAddress || obj.price || obj.zpid) {
+          return extractPropertyFields(obj);
+        }
+        // Check nested values
+        for (const value of Object.values(obj)) {
           if (typeof value === 'object' && value !== null) {
-            const obj = value as Record<string, unknown>;
-            if (obj.streetAddress || obj.price || obj.zpid) {
-              return extractPropertyFields(obj);
+            const nested = value as Record<string, unknown>;
+            if (nested.streetAddress || nested.price || nested.zpid) {
+              return extractPropertyFields(nested);
             }
           }
         }
       }
-      return null;
-    }
-
-    return extractPropertyFields(property);
-  } catch {
-    return null;
-  }
-}
-
-function extractZillowFromSharedData(data: Record<string, unknown>): Partial<ScrapedPropertyData> | null {
-  try {
-    // Zillow shared data can have various structures
-    const apiCache = data.apiCache as string;
-    if (apiCache) {
-      try {
-        const cacheData = JSON.parse(apiCache);
-        for (const value of Object.values(cacheData)) {
-          if (typeof value === 'object' && value !== null) {
-            const obj = value as Record<string, unknown>;
-            const property = obj.property as Record<string, unknown>;
-            if (property) {
-              return extractPropertyFields(property);
-            }
-          }
-        }
-      } catch {
-        // Continue
-      }
-    }
-
-    // Direct property access
-    const property = data.property as Record<string, unknown>;
-    if (property) {
-      return extractPropertyFields(property);
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function extractZillowFromGdpCache(data: Record<string, unknown>): Partial<ScrapedPropertyData> | null {
-  try {
-    // gdpClientCache contains stringified JSON values
-    for (const value of Object.values(data)) {
-      if (typeof value === 'string') {
-        try {
-          const parsed = JSON.parse(value);
-          const property = parsed.property as Record<string, unknown>;
-          if (property) {
-            return extractPropertyFields(property);
-          }
-        } catch {
-          // Continue
-        }
-      } else if (typeof value === 'object' && value !== null) {
-        const obj = value as Record<string, unknown>;
-        const property = obj.property as Record<string, unknown>;
-        if (property) {
-          return extractPropertyFields(property);
-        }
-      }
     }
     return null;
   } catch {
@@ -397,11 +458,7 @@ function extractZillowFromGdpCache(data: Record<string, unknown>): Partial<Scrap
   }
 }
 
-/**
- * Helper to extract common property fields from various Zillow data structures
- */
 function extractPropertyFields(property: Record<string, unknown>): Partial<ScrapedPropertyData> {
-  // Handle nested address object or direct address string
   let address = 'Unknown';
   const addressObj = property.address as Record<string, unknown>;
   if (addressObj && typeof addressObj === 'object') {
@@ -417,7 +474,6 @@ function extractPropertyFields(property: Record<string, unknown>): Partial<Scrap
     address = property.fullAddress as string;
   }
 
-  // Handle price which may be nested
   let price = 0;
   if (property.price) {
     price = parsePrice(property.price as string);
@@ -431,7 +487,6 @@ function extractPropertyFields(property: Record<string, unknown>): Partial<Scrap
     }
   }
 
-  // Check for price reduction
   const priceHistory = property.priceHistory as unknown[];
   const hasPriceReduction = Array.isArray(priceHistory) && priceHistory.length > 1;
 
@@ -449,139 +504,86 @@ function extractPropertyFields(property: Record<string, unknown>): Partial<Scrap
   };
 }
 
-function parseZillowInlineData(data: Record<string, unknown>, url: string): ScrapedPropertyData | null {
+function parseZillowFromHtmlRegex(html: string, url: string): ScrapedPropertyData | null {
   try {
-    return {
-      address: (data.streetAddress || data.address || 'Unknown') as string,
-      listPrice: parsePrice(data.price as string || data.listPrice as string),
-      daysOnMarket: extractNumber(data.daysOnZillow as string || data.timeOnZillow as string),
-      bedrooms: extractNumber(data.bedrooms as string || data.beds as string),
-      bathrooms: extractNumber(data.bathrooms as string || data.baths as string),
-      propertyType: normalizePropertyType(data.homeType as string),
-      squareFeet: extractNumber(data.livingArea as string || data.sqft as string),
-      yearBuilt: extractNumber(data.yearBuilt as string),
-      priceReduced: false,
-      source: 'zillow',
-      sourceUrl: url,
-      scrapedAt: new Date().toISOString(),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function parseZillowFromHtml(html: string, url: string): ScrapedPropertyData | null {
-  try {
-    // Extract price from multiple patterns (Zillow uses various formats)
+    // Aggressive price extraction
     let price = 0;
     const pricePatterns = [
-      /class="[^"]*price[^"]*"[^>]*>\s*\$?([\d,]+)/i,
-      /data-testid="[^"]*price[^"]*"[^>]*>\s*\$?([\d,]+)/i,
-      /\$\s*([\d,]+(?:,\d{3})*)/,
-      /"price"\s*:\s*"?\$?([\d,]+)/i,
-      /itemprop="price"[^>]*content="([\d,]+)"/i,
+      /\$\s*([\d,]+)(?:,000)?/g,
+      /"price"\s*:\s*"?\$?([\d,]+)/gi,
+      /class="[^"]*price[^"]*"[^>]*>\s*\$?([\d,]+)/gi,
+      /data-testid="[^"]*price[^"]*"[^>]*>\s*\$?([\d,]+)/gi,
+      /itemprop="price"[^>]*content="([\d,]+)"/gi,
     ];
+
     for (const pattern of pricePatterns) {
-      const match = html.match(pattern);
-      if (match) {
-        price = parsePrice(match[1]);
-        if (price > 10000) break; // Likely a real price, not a count
+      const matches = html.matchAll(pattern);
+      for (const match of matches) {
+        const parsed = parsePrice(match[1]);
+        if (parsed > 50000 && parsed < 100000000) { // Reasonable home price range
+          price = parsed;
+          break;
+        }
       }
+      if (price > 0) break;
     }
 
-    // Extract address from multiple sources
+    // Aggressive address extraction
     let address = '';
     const addressPatterns = [
       /<title[^>]*>([^|<]+)/i,
-      /class="[^"]*address[^"]*"[^>]*>([^<]+)/i,
-      /data-testid="[^"]*address[^"]*"[^>]*>([^<]+)/i,
       /"streetAddress"\s*:\s*"([^"]+)"/i,
+      /class="[^"]*address[^"]*"[^>]*>([^<]+)/i,
+      /<h1[^>]*>([^<]*(?:St|Ave|Rd|Dr|Ln|Ct|Blvd|Way|Pl|Circle|Court)[^<]*)</i,
       /itemprop="streetAddress"[^>]*>([^<]+)/i,
-      /<h1[^>]*>([^<]+(?:St|Ave|Rd|Dr|Ln|Ct|Blvd|Way|Pl)[^<]*)</i,
     ];
+
     for (const pattern of addressPatterns) {
       const match = html.match(pattern);
       if (match && match[1].trim().length > 5) {
-        address = match[1].trim().split('|')[0].split('-')[0].trim();
-        break;
+        address = match[1].trim().split('|')[0].split(' - ')[0].trim();
+        // Clean up common suffixes
+        address = address.replace(/\s*[|]\s*Zillow.*$/i, '').trim();
+        if (address.length > 5) break;
       }
     }
 
-    // Extract beds from multiple patterns
-    let beds = 0;
-    const bedsPatterns = [
-      /(\d+)\s*(?:bd|bed|bedroom|br)\b/i,
-      /"bedrooms?"\s*:\s*(\d+)/i,
-      /data-testid="[^"]*bed[^"]*"[^>]*>(\d+)/i,
-    ];
-    for (const pattern of bedsPatterns) {
-      const match = html.match(pattern);
-      if (match) {
-        beds = parseInt(match[1]);
-        if (beds > 0 && beds < 20) break;
-      }
+    // If still no address, try URL extraction
+    if (!address) {
+      address = extractAddressFromZillowUrl(url);
     }
 
-    // Extract baths from multiple patterns
-    let baths = 0;
-    const bathsPatterns = [
-      /(\d+(?:\.\d+)?)\s*(?:ba|bath|bathroom)\b/i,
-      /"bathrooms?"\s*:\s*(\d+(?:\.\d+)?)/i,
-      /data-testid="[^"]*bath[^"]*"[^>]*>(\d+(?:\.\d+)?)/i,
-    ];
-    for (const pattern of bathsPatterns) {
-      const match = html.match(pattern);
-      if (match) {
-        baths = parseFloat(match[1]);
-        if (baths > 0 && baths < 20) break;
-      }
-    }
+    // Extract beds/baths/sqft
+    let beds = 0, baths = 0, sqft: number | undefined;
 
-    // Extract days on market
+    const bedsMatch = html.match(/(\d+)\s*(?:bd|bed|bedroom|br)\b/i);
+    if (bedsMatch) beds = parseInt(bedsMatch[1]);
+
+    const bathsMatch = html.match(/(\d+(?:\.\d+)?)\s*(?:ba|bath|bathroom)\b/i);
+    if (bathsMatch) baths = parseFloat(bathsMatch[1]);
+
+    const sqftMatch = html.match(/([\d,]+)\s*(?:sq\.?\s*ft|sqft|square\s*feet)/i);
+    if (sqftMatch) sqft = parseInt(sqftMatch[1].replace(/,/g, ''));
+
+    // Days on market
     let dom = 0;
-    const domPatterns = [
-      /(\d+)\s*days?\s*(?:on\s*)?zillow/i,
-      /(\d+)\s*days?\s*(?:on\s*)?market/i,
-      /"daysOnZillow"\s*:\s*(\d+)/i,
-      /"timeOnZillow"\s*:\s*"(\d+)/i,
-    ];
-    for (const pattern of domPatterns) {
-      const match = html.match(pattern);
-      if (match) {
-        dom = parseInt(match[1]);
-        break;
-      }
-    }
+    const domMatch = html.match(/(\d+)\s*days?\s*(?:on\s*)?(?:zillow|market)/i);
+    if (domMatch) dom = parseInt(domMatch[1]);
 
-    // Extract sqft
-    let sqft: number | undefined;
-    const sqftPatterns = [
-      /([\d,]+)\s*(?:sq\.?\s*ft|sqft|square\s*feet)/i,
-      /"livingArea"\s*:\s*([\d,]+)/i,
-      /"livingAreaValue"\s*:\s*([\d,]+)/i,
-    ];
-    for (const pattern of sqftPatterns) {
-      const match = html.match(pattern);
-      if (match) {
-        sqft = parseInt(match[1].replace(/,/g, ''));
-        if (sqft > 100) break;
-      }
-    }
-
-    // Need at least price or address to be useful
+    // Need at least some useful data
     if (!price && !address) {
       return null;
     }
 
     return {
-      address: address || 'Address from URL',
+      address: address || 'Unknown Address',
       listPrice: price,
       daysOnMarket: dom,
       bedrooms: beds,
       bathrooms: baths,
       propertyType: 'other',
       squareFeet: sqft,
-      priceReduced: html.toLowerCase().includes('price cut') || html.toLowerCase().includes('reduced') || html.toLowerCase().includes('price drop'),
+      priceReduced: /price\s*(cut|drop|reduced)/i.test(html),
       source: 'zillow',
       sourceUrl: url,
       scrapedAt: new Date().toISOString(),
@@ -595,12 +597,9 @@ function parseZillowFromHtml(html: string, url: string): ScrapedPropertyData | n
 // REDFIN SCRAPER
 // =============================================================================
 
-/**
- * Parse Redfin listing page
- */
 export function parseRedfinHtml(html: string, url: string): ScrapedPropertyData | null {
   try {
-    // Strategy 1: Look for JSON-LD structured data
+    // Strategy 1: JSON-LD
     const jsonLdMatch = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
     if (jsonLdMatch) {
       for (const match of jsonLdMatch) {
@@ -610,7 +609,6 @@ export function parseRedfinHtml(html: string, url: string): ScrapedPropertyData 
           if (data['@type'] === 'SingleFamilyResidence' || data['@type'] === 'Product' || data['@type'] === 'Residence') {
             return parseRedfinJsonLd(data, url);
           }
-          // Redfin sometimes wraps in array
           if (Array.isArray(data)) {
             for (const item of data) {
               if (item['@type']?.includes('Residence') || item['@type'] === 'Product') {
@@ -619,37 +617,37 @@ export function parseRedfinHtml(html: string, url: string): ScrapedPropertyData 
             }
           }
         } catch {
-          // Continue to next match
+          // Continue
         }
       }
     }
 
-    // Strategy 2: Look for Redfin's embedded data
-    const redfinDataMatch = html.match(/window\.__reactServerState\s*=\s*({[\s\S]*?});?\s*<\/script>/i);
-    if (redfinDataMatch) {
+    // Strategy 2: Redfin server state
+    const serverStateMatch = html.match(/window\.__reactServerState\s*=\s*({[\s\S]*?});?\s*<\/script>/i);
+    if (serverStateMatch) {
       try {
-        const data = JSON.parse(redfinDataMatch[1]);
+        const data = JSON.parse(serverStateMatch[1]);
         const propertyData = extractRedfinFromServerState(data);
         if (propertyData && hasRequiredData(propertyData)) {
           return completePropertyData(propertyData, 'redfin', url);
         }
       } catch {
-        // Continue to fallback
+        // Continue
       }
     }
 
-    // Strategy 3: Look for initialData or propertyData
-    const initialDataMatch = html.match(/(?:initialData|propertyData|listingData)\s*[=:]\s*({[\s\S]*?})\s*[,;]/i);
-    if (initialDataMatch) {
+    // Strategy 3: Inline data
+    const inlineMatch = html.match(/(?:initialData|propertyData)\s*[=:]\s*({[\s\S]*?})\s*[,;]/i);
+    if (inlineMatch) {
       try {
-        const data = JSON.parse(initialDataMatch[1]);
+        const data = JSON.parse(inlineMatch[1]);
         return parseRedfinInlineData(data, url);
       } catch {
-        // Continue to fallback
+        // Continue
       }
     }
 
-    // Strategy 4: HTML parsing fallback
+    // Strategy 4: HTML fallback
     return parseRedfinFromHtml(html, url);
 
   } catch (error) {
@@ -691,7 +689,6 @@ function parseRedfinJsonLd(data: Record<string, unknown>, url: string): ScrapedP
 
 function extractRedfinFromServerState(data: Record<string, unknown>): Partial<ScrapedPropertyData> | null {
   try {
-    // Navigate Redfin's data structure (varies by page type)
     const findProperty = (obj: Record<string, unknown>): Record<string, unknown> | null => {
       if (obj.propertyId || obj.listingId || obj.streetAddress) {
         return obj;
@@ -708,7 +705,6 @@ function extractRedfinFromServerState(data: Record<string, unknown>): Partial<Sc
     const property = findProperty(data);
     if (!property) return null;
 
-    // Extract nested price info
     const priceInfo = property.priceInfo as Record<string, unknown> | undefined;
     const avm = property.avm as Record<string, unknown> | undefined;
 
@@ -752,27 +748,18 @@ function parseRedfinInlineData(data: Record<string, unknown>, url: string): Scra
 
 function parseRedfinFromHtml(html: string, url: string): ScrapedPropertyData | null {
   try {
-    // Extract price
     const priceMatch = html.match(/\$[\d,]+(?:\.\d{2})?/);
     const price = priceMatch ? parsePrice(priceMatch[0]) : 0;
 
-    // Extract address from title or specific Redfin elements
     const titleMatch = html.match(/<title[^>]*>([^<]+)</i);
     const addressFromTitle = titleMatch ? titleMatch[1].split('|')[0].split('-')[0].trim() : '';
 
-    // Extract beds/baths
     const bedsMatch = html.match(/(\d+)\s*(?:bed|br|bedroom)/i);
     const bathsMatch = html.match(/(\d+(?:\.\d+)?)\s*(?:bath|ba|bathroom)/i);
-
-    // Extract days on Redfin
     const domMatch = html.match(/(\d+)\s*days?\s*(?:on\s*)?redfin/i);
-
-    // Extract sqft
     const sqftMatch = html.match(/([\d,]+)\s*(?:sq\.?\s*ft|sqft|square\s*feet)/i);
 
-    if (!price && !addressFromTitle) {
-      return null;
-    }
+    if (!price && !addressFromTitle) return null;
 
     return {
       address: addressFromTitle || 'Address from URL',
@@ -782,7 +769,7 @@ function parseRedfinFromHtml(html: string, url: string): ScrapedPropertyData | n
       bathrooms: bathsMatch ? parseFloat(bathsMatch[1]) : 0,
       propertyType: 'other',
       squareFeet: sqftMatch ? parseInt(sqftMatch[1].replace(/,/g, '')) : undefined,
-      priceReduced: html.toLowerCase().includes('price drop') || html.toLowerCase().includes('reduced'),
+      priceReduced: /price\s*(drop|reduced)/i.test(html),
       source: 'redfin',
       sourceUrl: url,
       scrapedAt: new Date().toISOString(),
@@ -793,12 +780,9 @@ function parseRedfinFromHtml(html: string, url: string): ScrapedPropertyData | n
 }
 
 // =============================================================================
-// MAIN SCRAPER FUNCTION
+// MAIN SCRAPER FUNCTION (AGGRESSIVE MULTI-STRATEGY)
 // =============================================================================
 
-/**
- * Scrape property data from a Zillow or Redfin URL
- */
 export async function scrapeProperty(url: string): Promise<ScrapedPropertyData | null> {
   const source = detectSource(url);
 
@@ -806,37 +790,101 @@ export async function scrapeProperty(url: string): Promise<ScrapedPropertyData |
     throw new Error('UNSUPPORTED_SITE');
   }
 
-  // Fetch the page with appropriate headers
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.5',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Connection': 'keep-alive',
-      'Upgrade-Insecure-Requests': '1',
-      'Cache-Control': 'max-age=0',
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error('FETCH_FAILED');
-  }
-
-  const html = await response.text();
-
-  // Parse based on source
-  let data: ScrapedPropertyData | null = null;
-
+  // For Zillow, try API-first approach
   if (source === 'zillow') {
-    data = parseZillowHtml(html, url);
-  } else if (source === 'redfin') {
-    data = parseRedfinHtml(html, url);
+    const zpid = extractZpid(url);
+
+    // Strategy 1: Try Zillow API with ZPID
+    if (zpid) {
+      const apiData = await fetchZillowFromApi(zpid);
+      if (apiData && hasRequiredData(apiData)) {
+        return completePropertyData(apiData, 'zillow', url);
+      }
+    }
   }
 
-  if (!data) {
-    throw new Error('PARSE_FAILED');
+  // Strategy 2: Fetch and parse HTML with rotating user agents
+  const userAgents = [...USER_AGENTS];
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const userAgent = userAgents[attempt % userAgents.length];
+
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': userAgent,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Connection': 'keep-alive',
+          'Upgrade-Insecure-Requests': '1',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+        },
+      });
+
+      if (!response.ok) {
+        if (response.status === 403 || response.status === 429) {
+          // Rate limited or blocked, try next user agent
+          await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+          continue;
+        }
+        throw new Error('FETCH_FAILED');
+      }
+
+      const html = await response.text();
+
+      // Check if we got a captcha/blocked page
+      if (html.includes('captcha') || html.includes('blocked') || html.includes('Access Denied')) {
+        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+        continue;
+      }
+
+      // Parse based on source
+      let data: ScrapedPropertyData | null = null;
+
+      if (source === 'zillow') {
+        data = parseZillowHtml(html, url);
+      } else if (source === 'redfin') {
+        data = parseRedfinHtml(html, url);
+      }
+
+      if (data) {
+        return data;
+      }
+    } catch (error) {
+      lastError = error as Error;
+    }
   }
 
-  return data;
+  // Strategy 3: For Zillow, try URL-based fallback
+  if (source === 'zillow') {
+    const addressFromUrl = extractAddressFromZillowUrl(url);
+    if (addressFromUrl) {
+      return {
+        address: addressFromUrl,
+        listPrice: 0, // User will need to enter manually
+        daysOnMarket: 0,
+        bedrooms: 0,
+        bathrooms: 0,
+        propertyType: 'other',
+        priceReduced: false,
+        source: 'zillow',
+        sourceUrl: url,
+        scrapedAt: new Date().toISOString(),
+        // Flag that this is partial data
+      } as ScrapedPropertyData;
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  throw new Error('PARSE_FAILED');
 }
